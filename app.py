@@ -1,3 +1,4 @@
+
 import streamlit as st
 import pandas as pd
 
@@ -7,47 +8,66 @@ st.set_page_config(
     layout="wide"
 )
 
+# Load location dataset
 @st.cache_data
 def load_places():
-   return pd.read_csv(
-    "themove_little_rock_places.csv"
-)
+    return pd.read_csv(
+        "themove_little_rock_places.csv"
+    )
 
 places = load_places()
 
+# Page heading
 st.title("TheMove 📍")
 st.subheader("What's the Move?")
 st.write(
     "Discover activities and real places around Little Rock!"
 )
 
+# Sidebar inputs
 st.sidebar.header("Plan Your Move")
+
+location = st.sidebar.text_input(
+    "Where are we making moves?",
+    placeholder="Enter your city or location",
+    value="Little Rock, AR"
+)
+
+# Validate supported location
+supported_locations = {
+    "little rock",
+    "little rock, ar",
+    "little rock, arkansas"
+}
+
+if location.strip().lower() not in supported_locations:
+    st.warning(
+        "TheMove currently supports locations around "
+        "central Little Rock, Arkansas. "
+        "Additional cities are not yet supported."
+    )
+    st.stop()
 
 category = st.sidebar.selectbox(
     "What are you in the mood for?",
-    sorted(places["activity_category"].unique())
+    sorted(places["activity_category"].dropna().unique())
 )
 
-distance = st.sidebar.slider(
-    "Maximum distance from downtown (km)",
-    min_value=1,
-    max_value=15,
-    value=10
+place_types = sorted(
+    places.loc[
+        places["activity_category"] == category,
+        "fclass"
+    ].dropna().unique().tolist()
 )
 
 place_type = st.sidebar.selectbox(
     "Preferred place type",
-    ["Any"] + sorted(
-        places.loc[
-            places["activity_category"] == category,
-            "fclass"
-        ].unique()
-    .tolist())
+    ["Any"] + place_types
 )
 
+# Filter by selected category
 matches = places[
-    (places["activity_category"] == category)
-    & (places["distance_km"] <= distance)
+    places["activity_category"] == category
 ].copy()
 
 if place_type != "Any":
@@ -55,16 +75,17 @@ if place_type != "Any":
         matches["fclass"] == place_type
     ]
 
+# Sort by distance from central Little Rock
 matches = matches.sort_values(
     ["distance_km", "name"]
 )
 
-st.subheader("Your Recommended Places")
+st.subheader("Your Suggested Places")
 
 if matches.empty:
     st.warning(
-        "No matching places found. Try a different "
-        "category or increase your distance."
+        "No places found for this category. "
+        "Try selecting another activity."
     )
 else:
     st.success(
@@ -88,7 +109,8 @@ else:
     )
 
 st.caption(
-    "Places are from OpenStreetMap geographic data. "
-    "Distances are approximate from central Little Rock. "
-    "Opening hours and prices are not verified."
+    "Places are sourced from OpenStreetMap geographic data. "
+    "Distances are approximate from central Little Rock, "
+    "not from the user's exact location. "
+    "Prices and opening hours are not verified."
 )
