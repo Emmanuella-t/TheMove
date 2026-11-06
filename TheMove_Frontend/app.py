@@ -77,8 +77,33 @@ st.markdown('<div class="section-intro">Different tastes? Different budgets? No 
 col1, col2 = st.columns(2)
 with col1:
     group_size = st.number_input("How many friends are going?", min_value=2, max_value=5, value=3, step=1)
+
 with col2:
-    max_distance = st.slider("Distance from downtown Little Rock (km)", min_value=1, max_value=15, value=10)
+    location = st.text_input(
+        "Where are we making moves?",
+        value="Little Rock, AR",
+        placeholder="Enter your city",
+        key="group_location"
+    )
+
+# The current dataset only covers central Little Rock
+max_distance = 15
+
+
+# Only Little Rock is currently supported
+supported_locations = {
+    "little rock",
+    "little rock, ar",
+    "little rock, arkansas"
+}
+
+if location.strip().lower() not in supported_locations:
+    st.warning(
+        "TheMove currently supports Little Rock, Arkansas. "
+        "Recommendations for other cities are not available yet."
+    )
+    st.stop()
+
 
 friends = []
 for i in range(int(group_size)):
@@ -134,7 +159,7 @@ if "plan_friends" in st.session_state:
     current_distance = st.session_state["plan_distance"]
     current_method = st.session_state["plan_method"]
     spending_limit = min(person["budget"] for person in current_friends)
-    st.markdown(f"### Here's the move for your crew ✨")
+    st.markdown(f"### Here's the move for your crew ")
     st.markdown(f"**Shared budget ceiling:** ${spending_limit} per person (the lowest individual budget, assuming everyone pays for themselves).")
     st.warning("Our venue catalog has no verified prices. Budget is shown as a planning constraint, but places are **not** filtered or certified as affordable. Check prices before going.")
 
