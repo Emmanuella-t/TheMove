@@ -1,0 +1,13 @@
+{
+  "model_features": [
+    "item",
+    "opn",
+    "cns",
+    "ext",
+    "agr",
+    "est",
+    "experience"
+  ],
+  "sklearn_version": "1.6.1",
+  "model_purpose": "Predict ratings for research items D1-D10"
+}
