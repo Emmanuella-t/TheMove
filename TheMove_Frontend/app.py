@@ -299,48 +299,106 @@ if "plan_friends" in st.session_state and location_supported and st.session_stat
             st.caption("'Most popular across the crew' ranks activities by combined preference score. It may leave some friends out.")
     st.caption("Local recommendations use explicit selections and keyword rules, not the research Random Forest model.")
 
-    mapped_rows = []
-    if not display_rows:
-        st.info("No venues were available within the current 15 km Little Rock catalog radius.")
-    for rank, row in enumerate(display_rows, start=1):
-        category = row["category"]
-        interested = int(row["people_interested"])
-        consensus = interested == len(current_friends)
-        if no_preferences or current_surprise:
-            label = " — TRY THIS" if rank == 1 else ""
-        elif rank == 1 and consensus:
-            label = " — GROUP MATCH"
-        elif rank == 1:
-            label = " — MOST SUPPORTED (NOT UNANIMOUS)"
-        else:
-            label = ""
-        st.markdown(f"#### {rank}. {EMOJI[category]} {category}{label}")
-        if no_preferences or current_surprise:
-            st.write("A starting idea for the group — no preference match is claimed.")
-        else:
-            st.write(f"Matches **{interested} of {len(current_friends)}** friends based on entered interests and moods.")
+    # Produce three ACTUAL venue options, not three groups of venue cards.
+    # A single best-supported option is featured, followed by two alternatives.
+    # We do not claim statistical confidence, verified affordability, or unanimous agreement.
+    discovery = no_preferences or current_surprise
+    suggestions = []
+    selected_ids = set()
+    unavailable = []
 
-        # For discovery mode, pick a variety of categories, one local place each.
-        venue_limit = 1 if (no_preferences or current_surprise) else 3
-        picks, requested = select_venues(places, category, [] if current_surprise or no_preferences else current_friends, limit=venue_limit)
-        if picks.empty:
-            if requested:
-                st.warning(
-                    f"We found no catalog venue specifically matching **{', '.join(requested)}** "
-                    "within 15 km of central Little Rock. We won't substitute a different type of venue and pretend it's the same experience."
+    def append_options(category, limit):
+        picks, requested = select_venues(
+            places, category, [] if discovery else current_friends,
+            limit=max(limit + 3, 6),
+        )
+        if picks.empty and requested:
+            unavailable.append(f"{category}: {', '.join(requested)}")
+        for _, place in picks.iterrows():
+            # Prevent the same venue from appearing twice if catalogs overlap.
+            venue_id = str(place.get("osm_id", "")) or (
+                str(place["name"]), float(place["latitude"]), float(place["longitude"])
+            )
+            if venue_id in selected_ids:
+                continue
+            selected_ids.add(venue_id)
+            suggestions.append({"place": place, "category": category,
+                                "matched": 0 if discovery else int(coverage.get(category, 0)),
+                                "requested": requested})
+            if len(suggestions) >= limit:
+                break
+
+    coverage = {row["category"]: int(row["people_interested"]) for row in display_rows}
+    for row in display_rows:
+        if len(suggestions) >= 3:
+            break
+        append_options(row["category"], 1)
+
+    # Prefer extra distinct places from the best-ranked requested category over
+    # unrelated categories, while retaining any specific-subtype filtering.
+    if len(suggestions) < 3 and not discovery and display_rows:
+        first_category = display_rows[0]["category"]
+        append_options(first_category, 3)
+
+    # If preferences produce fewer than three available places, fill from other
+    # venue types while labeling those additions as exploratory alternatives.
+    if len(suggestions) < 3:
+        for category in CATEGORIES:
+            if len(suggestions) >= 3:
+                break
+            if category in coverage:
+                continue
+            extra, _ = select_venues(places, category, [], limit=5)
+            for _, place in extra.iterrows():
+                venue_id = str(place.get("osm_id", "")) or (
+                    str(place["name"]), float(place["latitude"]), float(place["longitude"])
                 )
-            else:
-                st.caption("No places in this activity category within the current 15 km catalog radius.")
-        else:
-            if requested:
-                st.caption(f"Venue results are filtered for the requested type: {', '.join(requested)}.")
-            for _, place in picks.iterrows():
-                venue_card(place)
-            mapped_rows.append(picks)
+                if venue_id in selected_ids:
+                    continue
+                selected_ids.add(venue_id)
+                suggestions.append({"place": place, "category": category,
+                                    "matched": 0, "requested": [], "exploratory": True})
+                if len(suggestions) >= 3:
+                    break
 
-    if mapped_rows:
-        st.markdown("#### Places on the map 🗺️")
-        st.map(pd.concat(mapped_rows, ignore_index=True), latitude="latitude", longitude="longitude")
+    if unavailable:
+        st.warning("We couldn't find an exact local match for " + "; ".join(unavailable) + ". We won't label unrelated venues as exact matches.")
+
+    if suggestions:
+        st.markdown("### TheMove's Top Pick")
+        top = suggestions[0]
+        top_category = top["category"]
+        top_match = top["matched"]
+        top_name = str(top["place"]["name"])
+        if discovery:
+            reason = "A starting idea selected from the available local venue catalog—not a personalized prediction."
+        elif top_match == len(current_friends):
+            reason = f"Best-ranked available activity type, matching all {len(current_friends)} friends' expressed interests."
+        elif top_match > 0:
+            reason = (f"Highest-ranked available activity type, matching {top_match} of "
+                      f"{len(current_friends)} friends. Not everyone agreed, so check with the crew first.")
+        else:
+            reason = "An exploratory alternative; no friend explicitly requested this activity type."
+        st.markdown(f"**{EMOJI[top_category]} {html.escape(top_name)}** · {top_category}")
+        st.write("**Why this one?** " + reason)
+        venue_card(top["place"])
+
+        if len(suggestions) > 1:
+            st.markdown("### Two other ideas")
+            for i, choice in enumerate(suggestions[1:], start=2):
+                category = choice["category"]
+                st.markdown(f"#### Option {i} · {EMOJI[category]} {category}")
+                if discovery or choice.get("exploratory", False):
+                    st.caption("Exploratory alternative; preference match not established.")
+                else:
+                    st.caption(f"Matches {choice['matched']} of {len(current_friends)} friends' expressed interests.")
+                venue_card(choice["place"])
+        st.caption("Exactly one top pick is highlighted. Rankings use transparent preference and venue rules, not the trained research Random Forest model.")
+        st.markdown("#### Your three places on the map 🗺️")
+        st.map(pd.DataFrame([choice["place"] for choice in suggestions]), latitude="latitude", longitude="longitude")
+    else:
+        st.info("There are no eligible venues in this 15 km catalog radius for these inputs.")
+
     with st.expander("Why these suggestions?"):
         st.write("Selected activity interests receive more weight than keywords in mood descriptions. The two group strategies use different sorting priorities. If no shared preference exists, we show that uncertainty rather than claiming a unanimous top choice.")
         st.write("When someone requests a specific venue type (such as a café, museum or gallery), results are filtered to matching names or mapped venue types. If that type is absent from the local catalog, we say so.")
