@@ -1,11 +1,12 @@
-"""TheMove: Little Rock group activity planner + separate research ML demonstration.
+"""TheMove — group activity planner for Little Rock, Arkansas.
 
-Venue recommendations use explicit group preferences and keyword rules.
-The Random Forest is trained for anonymous research items, not local venues.
+Live suggestions are transparent preference/keyword matches to OSM-derived places.
+The research Random Forest is evaluated separately and is not used for venues.
 """
 from pathlib import Path
 import html
-import json
+import re
+
 import pandas as pd
 import streamlit as st
 
@@ -13,17 +14,173 @@ BASE = Path(__file__).resolve().parent
 CSV = BASE / "themove_little_rock_places.csv"
 LOGO = BASE / "assets" / "logo_horizontal.png"
 ICON = BASE / "assets" / "app_icon.png"
-MODEL_INFO_PATH = BASE / "models" / "themove_model_info.json"
 
 CATEGORIES = ["Food & Drinks", "Outdoor & Nature", "Arts & Culture", "Entertainment", "Sports & Recreation"]
 EMOJI = {"Food & Drinks": "🍜", "Outdoor & Nature": "🌳", "Arts & Culture": "🎨", "Entertainment": "🎭", "Sports & Recreation": "🏀"}
 KEYWORDS = {
-    "Food & Drinks": ["food", "eat", "dinner", "lunch", "brunch", "restaurant", "cafe", "coffee", "drink", "snack", "chill", "catch up"],
+    "Food & Drinks": ["food", "eat", "dinner", "lunch", "brunch", "restaurant", "cafe", "café", "coffee", "drink", "snack", "chill", "catch up"],
     "Outdoor & Nature": ["outside", "outdoor", "nature", "park", "hike", "walk", "picnic", "relax", "scenic"],
     "Arts & Culture": ["art", "museum", "history", "culture", "gallery", "creative"],
-    "Entertainment": ["fun", "comedy", "movie", "cinema", "show", "nightlife", "music", "theatre", "dance", "party"],
+    "Entertainment": ["fun", "comedy", "movie", "cinema", "show", "nightlife", "music", "theatre", "theater", "dance", "party"],
     "Sports & Recreation": ["sports", "sport", "active", "fitness", "basketball", "swim", "play", "game", "adventure"],
 }
+
+# Matching these strong user intents to venue types prevents recommending a
+# fast-food restaurant for a café outing or a memorial for a museum visit.
+SPECIFIC_REQUESTS = {
+    "coffee / café": {
+        "terms": ("coffee", "cafe", "café", "espresso", "latte"),
+        "fclass": ("cafe", "coffee_shop", "coffeehouse", "tea_house"),
+        "name": ("coffee", "cafe", "café", "espresso", "roaster"),
+        "categories": ("Food & Drinks",),
+    },
+    "museum": {
+        "terms": ("museum",),
+        "fclass": ("museum",),
+        "name": ("museum",),
+        "categories": ("Arts & Culture",),
+    },
+    "art gallery": {
+        "terms": ("art gallery", "gallery"),
+        "fclass": ("gallery", "art_gallery"),
+        "name": ("gallery",),
+        "categories": ("Arts & Culture",),
+    },
+    "park": {
+        "terms": ("park", "picnic"),
+        "fclass": ("park", "garden", "nature_reserve", "recreation_ground"),
+        "name": ("park", "garden"),
+        "categories": ("Outdoor & Nature",),
+    },
+    "sports center": {
+        "terms": ("basketball", "sports center", "sports centre", "recreation center", "recreation centre"),
+        "fclass": ("sports_centre", "sports_center", "pitch", "stadium", "recreation_ground"),
+        "name": ("recreation", "basketball", "sports"),
+        "categories": ("Sports & Recreation",),
+    },
+}
+
+
+def normalized(value):
+    return re.sub(r"\s+", " ", str(value).lower().replace("_", " ").strip())
+
+
+def contains_term(text, term):
+    """Find whole words/phrases rather than matching 'art' inside 'party'."""
+    return re.search(r"(?<!\w)" + re.escape(normalized(term)) + r"(?!\w)", normalized(text)) is not None
+
+
+def interest_scores(friend):
+    result = {category: 0 for category in CATEGORIES}
+    for category in friend["interests"]:
+        if category in result:
+            result[category] += 3
+    for category, terms in KEYWORDS.items():
+        if any(contains_term(friend["vibe"], term) for term in terms):
+            result[category] += 2
+    return result
+
+
+def requested_subtypes(friends, category):
+    descriptions = " ".join(person["vibe"] for person in friends)
+    found = []
+    for label, spec in SPECIFIC_REQUESTS.items():
+        if category in spec["categories"] and any(contains_term(descriptions, term) for term in spec["terms"]):
+            found.append(label)
+    return found
+
+
+def matching_subtype(place, label):
+    spec = SPECIFIC_REQUESTS[label]
+    kind = normalized(place["fclass"])
+    name = normalized(place["name"])
+    return any(contains_term(kind, term) for term in spec["fclass"]) or any(
+        contains_term(name, term) for term in spec["name"]
+    )
+
+
+def select_venues(places, category, friends, radius_km=15, limit=3):
+    """Rank local catalog places by specific requested subtype, then distance.
+
+    If specific subtypes are explicitly requested, do not present unrelated
+    venues from the broad category as equivalent. Empty results are honest.
+    """
+    candidates = places.loc[
+        (places["activity_category"] == category) & (places["distance_km"] <= radius_km)
+    ].copy()
+    subtypes = requested_subtypes(friends, category)
+    if subtypes:
+        candidates["specific_fit"] = candidates.apply(
+            lambda place: sum(matching_subtype(place, label) for label in subtypes), axis=1
+        )
+        candidates = candidates[candidates["specific_fit"] > 0]
+        candidates = candidates.sort_values(["specific_fit", "distance_km", "name"], ascending=[False, True, True])
+    else:
+        candidates = candidates.sort_values(["distance_km", "name"])
+    return candidates.head(limit), subtypes
+
+
+@st.cache_data
+def load_places(path):
+    df = pd.read_csv(path)
+    required = {"name", "fclass", "activity_category", "latitude", "longitude", "distance_km"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError("Missing columns: " + ", ".join(sorted(missing)))
+    df = df.dropna(subset=list(required)).copy()
+    for field in ["distance_km", "latitude", "longitude"]:
+        df[field] = pd.to_numeric(df[field], errors="coerce")
+    return df.dropna(subset=["distance_km", "latitude", "longitude"])
+
+
+def rank_categories(friends, method):
+    scores = [interest_scores(friend) for friend in friends]
+    rows = []
+    for category in CATEGORIES:
+        values = [person[category] for person in scores]
+        rows.append({
+            "category": category,
+            "people_interested": sum(value > 0 for value in values),
+            "total_score": sum(values),
+            "least_score": min(values),
+        })
+    ranked = pd.DataFrame(rows)
+    ranked = ranked[ranked["total_score"] > 0]
+    if method == "Include everyone":
+        return ranked.sort_values(
+            ["people_interested", "least_score", "total_score", "category"],
+            ascending=[False, False, False, True],
+        )
+    return ranked.sort_values(
+        ["total_score", "people_interested", "category"],
+        ascending=[False, False, True],
+    )
+
+
+def discovery_categories(places, radius_km=15):
+    """Offer distinct available categories if no one knows what to do."""
+    pool = places.loc[places["distance_km"] <= radius_km]
+    preference = ["Outdoor & Nature", "Food & Drinks", "Arts & Culture", "Entertainment", "Sports & Recreation"]
+    available = [category for category in preference if (pool["activity_category"] == category).any()]
+    return available[:3]
+
+
+def venue_card(place):
+    name = str(place["name"])
+    safe_name = html.escape(name)
+    kind = html.escape(str(place["fclass"]).replace("_", " ").title())
+    distance = float(place["distance_km"])
+    st.markdown(
+        f'<div class="venue"><h4>📍 {safe_name}</h4>'
+        f'<p>{kind} · {distance:.1f} km from central Little Rock · Price unverified</p></div>',
+        unsafe_allow_html=True,
+    )
+    lat, lon = float(place["latitude"]), float(place["longitude"])
+    st.link_button(
+        f"Directions to {name}",
+        f"https://www.google.com/maps/dir/?api=1&destination={lat}%2C{lon}",
+    )
+
 
 st.set_page_config(
     page_title="TheMove | What's the move?",
@@ -59,39 +216,10 @@ footer {visibility:hidden;}
 </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data
-def load_places(path: str):
-    df = pd.read_csv(path)
-    required = {"name", "fclass", "activity_category", "latitude", "longitude", "distance_km"}
-    missing = required - set(df.columns)
-    if missing:
-        raise ValueError("Missing columns: " + ", ".join(sorted(missing)))
-    df = df.dropna(subset=list(required)).copy()
-    for col in ["distance_km", "latitude", "longitude"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
-    return df.dropna(subset=["distance_km", "latitude", "longitude"])
-
-@st.cache_resource
-def load_ml_model(path: str):
-    # Only load model files you generated yourself and trust.
-    return joblib.load(path)
-
-def interest_scores(friend):
-    scores = {category: 0 for category in CATEGORIES}
-    for category in friend["interests"]:
-        if category in scores:
-            scores[category] += 3
-    vibe = friend["vibe"].lower()
-    for category, terms in KEYWORDS.items():
-        if any(term in vibe for term in terms):
-            scores[category] += 2
-    return scores
-
 if LOGO.exists():
     st.image(str(LOGO), width=220)
 else:
     st.markdown("### 🥭 TheMove")
-
 st.markdown('''<div class="hero"><span class="eyebrow">GOOD PLANS. BETTER MEMORIES.</span><h1>So… what's the move?</h1><p>The group chat is indecisive again. Tell us what your crew likes and discover real places around Little Rock.</p><span class="pill">🥭 Plan together · everyone gets a say</span></div>''', unsafe_allow_html=True)
 
 if not CSV.exists():
@@ -114,7 +242,7 @@ with right:
 supported_locations = {"little rock", "little rock, ar", "little rock, arkansas"}
 location_supported = location.strip().lower() in supported_locations
 if not location_supported:
-    st.warning("TheMove currently supports Little Rock, Arkansas. Recommendations for other cities are not available yet.")
+    st.warning("TheMove currently supports Little Rock, Arkansas. We won't show you Little Rock places as though they're in another city.")
 
 friends = []
 for i in range(int(group_size)):
@@ -131,58 +259,90 @@ for i in range(int(group_size)):
 st.markdown("---")
 st.subheader("Find your move")
 method = st.radio("How should we balance the group's preferences?", ["Include everyone", "Most popular across the crew"], horizontal=True)
+discover_anyway = st.checkbox("🎲 Surprise us — give us ideas even if we don't know what we want", value=False)
 
 if st.button("🥭 Find our move", type="primary", use_container_width=True, disabled=not location_supported):
-    st.session_state["plan_friends"] = friends
+    st.session_state["plan_friends"] = [dict(p) for p in friends]
     st.session_state["plan_method"] = method
+    st.session_state["plan_surprise"] = discover_anyway
     st.session_state["plan_location"] = location.strip().lower()
 
 if "plan_friends" in st.session_state and location_supported and st.session_state.get("plan_location") == location.strip().lower():
     current_friends = st.session_state["plan_friends"]
     current_method = st.session_state["plan_method"]
+    current_surprise = st.session_state.get("plan_surprise", False)
     spending_limit = min(p["budget"] for p in current_friends)
     st.markdown("### Here's the move for your crew")
     st.markdown(f"**Shared budget ceiling:** ${spending_limit} per person (lowest individual budget, assuming everyone pays for themselves).")
-    st.warning("Prices are unverified. This budget is a planning constraint, not an affordability filter. Check prices before going.")
+    st.warning("Venue prices are unverified. The budget is a planning constraint, not an affordability filter. Check admission, menu prices and transport costs before going.")
+    if spending_limit == 0:
+        st.info("Someone has a $0 budget. These places are discovery ideas only; none is verified as free. Consider a free activity once its cost is confirmed.")
 
-    scored = [interest_scores(friend) for friend in current_friends]
-    if not any(any(values.values()) for values in scored):
-        st.info("Enter at least one friend's vibe or select an activity type, then click Find our move again.")
+    ranked = rank_categories(current_friends, current_method)
+    no_preferences = ranked.empty
+    if no_preferences or current_surprise:
+        categories = discovery_categories(places)
+        st.info("**No plans? No problem!** Here are different ideas to get the group talking. These are exploratory picks, not personalized or budget-verified predictions.")
+        display_rows = [{"category": category, "people_interested": 0} for category in categories]
     else:
-        rows = []
-        for category in CATEGORIES:
-            values = [s[category] for s in scored]
-            rows.append({"category": category, "people_interested": sum(v > 0 for v in values), "total_score": sum(values), "least_score": min(values)})
-        ranked = pd.DataFrame(rows)
-        ranked = ranked[ranked["total_score"] > 0].copy()
+        display_rows = ranked.head(3).to_dict("records")
+        maximum_coverage = int(ranked["people_interested"].max())
+        if maximum_coverage < len(current_friends):
+            st.info(
+                f"**Not everyone agrees yet.** The strongest category matches {maximum_coverage} of "
+                f"{len(current_friends)} friends. These are conversation starters, not a group-wide consensus. "
+                "Ask everyone which other activity they would also try, then update their choices."
+            )
         if current_method == "Include everyone":
-            ranked = ranked.sort_values(["people_interested", "least_score", "total_score", "category"], ascending=[False, False, False, True])
+            st.caption("'Include everyone' ranks activities by how many friends expressed interest, then their lowest and combined scores. It cannot invent agreement when none exists.")
         else:
-            ranked = ranked.sort_values(["total_score", "people_interested", "category"], ascending=[False, False, True])
-        st.caption("Local activity ranking uses selected interests and keyword matching—not the research Random Forest model.")
-        for rank, row in enumerate(ranked.head(3).itertuples(), start=1):
-            category = row.category
-            label = " — TOP MATCH" if rank == 1 else ""
-            st.markdown(f"#### {rank}. {EMOJI[category]} {category}{label}")
-            st.write(f"Matches **{row.people_interested} of {len(current_friends)}** friends based on their entered interests and moods.")
-            matches = places[(places["activity_category"] == category) & (places["distance_km"] <= 15)].sort_values(["distance_km", "name"]).head(3)
-            if matches.empty:
-                st.caption("No named places in this category in the current 15 km catalog radius.")
-            else:
-                for _, place in matches.iterrows():
-                    name = html.escape(str(place["name"]))
-                    kind = html.escape(str(place["fclass"]).replace("_", " ").title())
-                    st.markdown(f'<div class="venue"><h4>📍 {name}</h4><p>{kind} · {place["distance_km"]:.1f} km from central Little Rock · Price unverified</p></div>', unsafe_allow_html=True)
-                    lat, lon = float(place["latitude"]), float(place["longitude"])
-                    st.link_button(f"Directions to {str(place['name'])}", f"https://www.google.com/maps/dir/?api=1&destination={lat}%2C{lon}")
-        selected_categories = ranked.head(3)["category"].tolist()
-        mapped = places[(places["activity_category"].isin(selected_categories)) & (places["distance_km"] <= 15)]
-        if not mapped.empty:
-            st.markdown("#### Places on the map 🗺️")
-            st.map(mapped.head(100), latitude="latitude", longitude="longitude")
-        with st.expander("Why these suggestions?"):
-            st.write("Selected interests have higher weight than keywords in mood descriptions. For 'Include everyone', the ranking favors categories matched by more friends; the other option prioritizes the combined score.")
-            st.write("This live venue matching is rule-based. The trained Random Forest predicts ratings of anonymous research destinations (D1–D10), not Arkansas venues.")
-        st.info("Venue names and coordinates come from historical OpenStreetMap-derived data. Prices, hours, accessibility and operating status have not been verified. Distances are from downtown, not travel time.")
+            st.caption("'Most popular across the crew' ranks activities by combined preference score. It may leave some friends out.")
+    st.caption("Local recommendations use explicit selections and keyword rules, not the research Random Forest model.")
 
-st.markdown("---")
+    mapped_rows = []
+    if not display_rows:
+        st.info("No venues were available within the current 15 km Little Rock catalog radius.")
+    for rank, row in enumerate(display_rows, start=1):
+        category = row["category"]
+        interested = int(row["people_interested"])
+        consensus = interested == len(current_friends)
+        if no_preferences or current_surprise:
+            label = " — TRY THIS" if rank == 1 else ""
+        elif rank == 1 and consensus:
+            label = " — GROUP MATCH"
+        elif rank == 1:
+            label = " — MOST SUPPORTED (NOT UNANIMOUS)"
+        else:
+            label = ""
+        st.markdown(f"#### {rank}. {EMOJI[category]} {category}{label}")
+        if no_preferences or current_surprise:
+            st.write("A starting idea for the group — no preference match is claimed.")
+        else:
+            st.write(f"Matches **{interested} of {len(current_friends)}** friends based on entered interests and moods.")
+
+        # For discovery mode, pick a variety of categories, one local place each.
+        venue_limit = 1 if (no_preferences or current_surprise) else 3
+        picks, requested = select_venues(places, category, [] if current_surprise or no_preferences else current_friends, limit=venue_limit)
+        if picks.empty:
+            if requested:
+                st.warning(
+                    f"We found no catalog venue specifically matching **{', '.join(requested)}** "
+                    "within 15 km of central Little Rock. We won't substitute a different type of venue and pretend it's the same experience."
+                )
+            else:
+                st.caption("No places in this activity category within the current 15 km catalog radius.")
+        else:
+            if requested:
+                st.caption(f"Venue results are filtered for the requested type: {', '.join(requested)}.")
+            for _, place in picks.iterrows():
+                venue_card(place)
+            mapped_rows.append(picks)
+
+    if mapped_rows:
+        st.markdown("#### Places on the map 🗺️")
+        st.map(pd.concat(mapped_rows, ignore_index=True), latitude="latitude", longitude="longitude")
+    with st.expander("Why these suggestions?"):
+        st.write("Selected activity interests receive more weight than keywords in mood descriptions. The two group strategies use different sorting priorities. If no shared preference exists, we show that uncertainty rather than claiming a unanimous top choice.")
+        st.write("When someone requests a specific venue type (such as a café, museum or gallery), results are filtered to matching names or mapped venue types. If that type is absent from the local catalog, we say so.")
+        st.write("Surprise Us offers diverse catalog categories without assuming what people like. The research ML model predicts ratings of anonymous study destinations (D1–D10) and is not used to score local businesses.")
+    st.info("Places come from historical OpenStreetMap-derived data. Prices, hours, accessibility and current operating status are not verified. Distances are approximate from downtown, not travel time.")
