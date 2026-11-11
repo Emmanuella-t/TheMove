@@ -14,7 +14,6 @@ BASE = Path(__file__).resolve().parent
 CSV = BASE / "themove_little_rock_places.csv"
 LOGO = BASE / "assets" / "logo_horizontal.png"
 ICON = BASE / "assets" / "app_icon.png"
-MODEL_PATH = BASE / "models" / "themove_rf_model.joblib"
 MODEL_INFO_PATH = BASE / "models" / "themove_model_info.json"
 
 CATEGORIES = ["Food & Drinks", "Outdoor & Nature", "Arts & Culture", "Entertainment", "Sports & Recreation"]
@@ -105,7 +104,7 @@ except Exception as exc:
     st.error(f"Unable to read venue catalog: {exc}")
     st.stop()
 
-st.subheader("01 / Assemble your crew 👯")
+st.subheader("Assemble your crew 👯")
 st.markdown('<div class="section-intro">Different tastes? Different budgets? No problem. Add what each friend is into, and we’ll find common ground.</div>', unsafe_allow_html=True)
 left, right = st.columns(2)
 with left:
@@ -131,7 +130,7 @@ for i in range(int(group_size)):
         friends.append({"name": name.strip() or f"Friend {i + 1}", "budget": int(budget), "vibe": vibe.strip(), "interests": interests})
 
 st.markdown("---")
-st.subheader("02 / Find your move")
+st.subheader("Find your move")
 method = st.radio("How should we balance the group's preferences?", ["Include everyone", "Most popular across the crew"], horizontal=True)
 
 if st.button("🥭 Find our move", type="primary", use_container_width=True, disabled=not location_supported):
@@ -188,47 +187,3 @@ if "plan_friends" in st.session_state and location_supported and st.session_stat
         st.info("Venue names and coordinates come from historical OpenStreetMap-derived data. Prices, hours, accessibility and operating status have not been verified. Distances are from downtown, not travel time.")
 
 st.markdown("---")
-with st.expander("For the professor · Try our trained Random Forest model"):
-    st.write("This is a separate research demonstration. It predicts ratings for anonymous items D1–D10 from the original study. These predictions do not represent local venue quality or affordability.")
-    if not MODEL_PATH.exists():
-        st.warning("Model file not found at `TheMove_Frontend/models/themove_rf_model.joblib`.")
-    else:
-        try:
-            model = load_ml_model(str(MODEL_PATH))
-            model_info = json.loads(MODEL_INFO_PATH.read_text(encoding="utf-8")) if MODEL_INFO_PATH.exists() else {}
-            expected = model_info.get("model_features", ["item", "opn", "cns", "ext", "agr", "est", "experience"])
-            required = ["item", "opn", "cns", "ext", "agr", "est", "experience"]
-            if set(expected) != set(required):
-                st.error(f"The exported model expects different features: {expected}. Check the notebook metadata before using this demo.")
-            else:
-                st.success("Trained Random Forest loaded successfully.")
-                st.caption("Personality-profile numbers below are example research inputs, not the friends' budgets or mood text. Use values appropriate to the training dataset's scales.")
-                with st.form("research_prediction_form"):
-                    item = st.selectbox("Research destination", [f"D{i}" for i in range(1, 11)])
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        opn = st.number_input("Openness (opn)", value=3.0, step=0.1)
-                        cns = st.number_input("Conscientiousness (cns)", value=3.0, step=0.1)
-                    with c2:
-                        ext = st.number_input("Extraversion (ext)", value=3.0, step=0.1)
-                        agr = st.number_input("Agreeableness (agr)", value=3.0, step=0.1)
-                    with c3:
-                        est = st.number_input("Emotional stability (est)", value=3.0, step=0.1)
-                        experience = st.number_input("Experience", value=3.0, step=0.1)
-                    predict_clicked = st.form_submit_button("Predict research rating")
-                if predict_clicked:
-                    data = {"item": item, "opn": opn, "cns": cns, "ext": ext, "agr": agr, "est": est, "experience": experience}
-                    features = pd.DataFrame([data], columns=expected)
-                    try:
-                        predicted = float(model.predict(features)[0])
-                        st.metric("Predicted research rating", f"{predicted:.2f}")
-                        st.caption("This is a research-item rating prediction, not a live Little Rock venue recommendation.")
-                    except Exception as exc:
-                        st.error(f"Prediction failed: {exc}. Check that item labels and feature scales match the training notebook.")
-        except Exception as exc:
-            st.error(f"Unable to load Random Forest: {exc}")
-            st.caption("Ensure your Streamlit environment uses compatible scikit-learn, joblib, pandas and NumPy versions.")
-
-with st.expander("For the professor · Research evaluation results"):
-    st.write("The research compared popularity, user-based KNN and Random Forest. On the group-aware held-out test (12 groups), popularity matched 5 of 12 recorded first choices (41.67%), while Random Forest average and minimum each matched 3 of 12 (25%).")
-    st.caption("These results are for anonymous research items. They do not measure accuracy of the local Little Rock venue suggestions. A generative conversational assistant is not yet integrated.")
